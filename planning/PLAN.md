@@ -54,11 +54,11 @@ The user runs a single Docker command (or a provided start script). A browser op
 │  FastAPI (Python/uv)                            │
 │  ├── /api/*          REST endpoints             │
 │  ├── /api/stream/*   SSE streaming              │
-│  └── /*              Static file serving         │
-│                      (Next.js export)            │
+│  └── /*              Static file serving        │
+│                      (Next.js export)           │
 │                                                 │
 │  SQLite database (volume-mounted)               │
-│  Background task: market data polling/sim        │
+│  Background task: market data polling/sim       │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -102,7 +102,7 @@ finally/
 │   └── .gitkeep              # Directory exists in repo; finally.db is gitignored
 ├── Dockerfile                # Multi-stage build (Node → Python)
 ├── docker-compose.yml        # Optional convenience wrapper
-├── .env                      # Environment variables (gitignored, .env.example committed)
+├── .env                      # Environment variables (gitignored; .env.example not yet committed)
 └── .gitignore
 ```
 
@@ -159,9 +159,9 @@ Both the simulator and the Massive client implement the same abstract interface.
 ### Massive API (Optional)
 
 - REST API polling (not WebSocket) — simpler, works on all tiers
-- Polls for the union of all watched tickers on a configurable interval
-- Free tier (5 calls/min): poll every 15 seconds
-- Paid tiers: poll every 2-15 seconds depending on tier
+- Polls for the union of all watched tickers on a configurable interval (`poll_interval` constructor param)
+- Default interval is 15 seconds, matched to the free tier (5 calls/min)
+- Paid tiers can poll faster (2-15s) but this requires passing a smaller `poll_interval` explicitly — there is no automatic tier detection
 - Parses REST response into the same format as the simulator
 
 ### Shared Price Cache
@@ -283,7 +283,7 @@ All tables include a `user_id` column defaulting to `"default"`. This is hardcod
 
 When writing code to make calls to LLMs, use cerebras-inference skill to use LiteLLM via OpenRouter to the `openrouter/openai/gpt-oss-120b` model with Cerebras as the inference provider. Structured Outputs should be used to interpret the results.
 
-There is an OPENROUTER_API_KEY in the .env file in the project root.
+Add your own `OPENROUTER_API_KEY` to a `.env` file in the project root (see section 5) — this key is required for LLM chat and is not committed to the repo.
 
 ### How It Works
 
@@ -454,3 +454,18 @@ The container is designed to deploy to AWS App Runner, Render, or any container 
 - Portfolio visualization: heatmap renders with correct colors, P&L chart has data points
 - AI chat (mocked): send a message, receive a response, trade execution appears inline
 - SSE resilience: disconnect and verify reconnection
+
+---
+
+## 13. Doc Review Log — 2026-07-02
+
+A doc review of this file cross-checked it against the completed market-data implementation (`backend/app/market/`). Findings and fixes applied:
+
+| # | Location | Issue | Fix applied |
+|---|----------|-------|--------------|
+| 1 | Section 6 Massive API | Implied automatic tier-based poll interval (2-15s for paid tiers); `MassiveDataSource` actually hardcodes a 15s default with no tier detection | Reworded to clarify the interval is a manual constructor param, not auto-detected |
+| 2 | Section 9 LLM Integration | Asserted "There is an OPENROUTER_API_KEY in the .env file" as present fact; no `.env` exists in the repo (correctly gitignored) | Reworded as a setup instruction pointing to Section 5 |
+| 3 | Section 4 Directory Structure | Listed `.env.example` as committed; the file does not exist in the repo | Annotated as not yet committed |
+| 4 | Section 3 Architecture diagram | ASCII box misaligned — 3 interior lines one character wider than the border | Re-padded the offending rows |
+
+Everything else checked (SSE endpoint shape, GBM shock probability/magnitude, seed tickers/prices, update interval, `MASSIVE_API_KEY` factory selection logic) matched the implementation and required no changes.
