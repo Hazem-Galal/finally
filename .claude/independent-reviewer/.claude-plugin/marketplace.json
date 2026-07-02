@@ -1,0 +1,18 @@
+{
+  
+  "name": "hazem-marketplace",
+  "version": "1.0.0",
+  "description": "Enterprise plugins for AWS, AI, Data Protection, Oracle, and architecture reviews.",
+  "owner": {
+    "name": "Hazem Ali",
+    "email": "hazem.ali1978@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "independent-reviewer",
+      "description": "Carries out an independent review of all changes since the last commit.",
+      "category": "quality",
+      "source": "./plugins/independent-reviewer"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "name": "independent-reviewer",
+  "version": "1.0.0",
+  "description": "Carry out an independent review of all changes since the last commit.",
+  "author": "Hazem Ali",
+  
+  
+}
