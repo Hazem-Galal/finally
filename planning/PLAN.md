@@ -84,6 +84,8 @@ The user runs a single Docker command (or a provided start script). A browser op
 
 ## 4. Directory Structure
 
+The tree below is the **target end-state** layout for the full application, not a snapshot of what exists today. As of this writing only `backend/` (with the completed `app/market/` subsystem) and `planning/` are implemented; `frontend/`, `scripts/`, `test/`, the top-level `db/`, `Dockerfile`, and `docker-compose.yml` are build targets for upcoming agent work and do not exist in the repo yet.
+
 ```
 finally/
 ├── frontend/                 # Next.js TypeScript project (static export)
@@ -102,7 +104,8 @@ finally/
 │   └── .gitkeep              # Directory exists in repo; finally.db is gitignored
 ├── Dockerfile                # Multi-stage build (Node → Python)
 ├── docker-compose.yml        # Optional convenience wrapper
-├── .env                      # Environment variables (gitignored; .env.example not yet committed)
+├── .env                      # Environment variables (gitignored)
+├── .env.example               # Template listing required/optional variables (see Section 5)
 └── .gitignore
 ```
 
@@ -137,7 +140,8 @@ LLM_MOCK=false
 - If `MASSIVE_API_KEY` is set and non-empty → backend uses Massive REST API for market data
 - If `MASSIVE_API_KEY` is absent or empty → backend uses the built-in market simulator
 - If `LLM_MOCK=true` → backend returns deterministic mock LLM responses (for E2E tests)
-- The backend reads `.env` from the project root (mounted into the container or read via docker `--env-file`)
+- If `OPENROUTER_API_KEY` is absent, everything except AI chat still works on first launch — market data streaming, watchlist, and trading are unaffected. `POST /api/chat` returns a clear "AI chat unavailable — set OPENROUTER_API_KEY" message instead of calling the LLM, so a missing key degrades gracefully rather than breaking the app
+- The backend reads `.env` via Docker's `--env-file` flag (see Section 11) when running in a container. Outside Docker (e.g. local `uv run` development), `.env` is **not** auto-loaded — export the variables in your shell, or add a dotenv loader if you want local `.env` support
 
 ---
 
@@ -176,7 +180,11 @@ Both the simulator and the Massive client implement the same abstract interface.
 - Endpoint: `GET /api/stream/prices`
 - Long-lived SSE connection; client uses native `EventSource` API
 - Server pushes price updates for all tickers known to the system at a regular cadence (~500ms) — in the single-user model this is equivalent to the user's watchlist
-- Each SSE event contains ticker, price, previous price, timestamp, and change direction
+- Each SSE event batches **all** tracked tickers into one `data:` payload, keyed by ticker (not one event per ticker):
+  ```json
+  data: {"AAPL": {"ticker": "AAPL", "price": 190.50, "previous_price": 190.20, "timestamp": 1735689600.123, "change": 0.30, "change_percent": 0.16, "direction": "up"}, "GOOGL": {...}}
+  ```
+  `change` and `change_percent` are computed relative to the **previous SSE update**, not a daily/session-open baseline (see Section 10 for how the frontend should label this)
 - Client handles reconnection automatically (EventSource has built-in retry)
 
 ---
@@ -193,7 +201,7 @@ The backend checks for the SQLite database on startup (or first request). If the
 
 ### Schema
 
-All tables include a `user_id` column defaulting to `"default"`. This is hardcoded for now (single-user) but enables future multi-user support without schema migration.
+All tables except `users_profile` include a `user_id` column defaulting to `"default"` (`users_profile` uses its `id` column as the user identifier instead). This is hardcoded for now (single-user) but enables future multi-user support without schema migration.
 
 **users_profile** — User state (cash balance)
 - `id` TEXT PRIMARY KEY (default: `"default"`)
@@ -243,6 +251,14 @@ All tables include a `user_id` column defaulting to `"default"`. This is hardcod
 
 - One user profile: `id="default"`, `cash_balance=10000.0`
 - Ten watchlist entries: AAPL, GOOGL, MSFT, AMZN, TSLA, NVDA, META, JPM, V, NFLX
+
+### Cost-Basis & Trade Accounting Rules
+
+- **Buys**: `avg_cost` is recalculated as a weighted average — `new_avg_cost = (old_qty * old_avg_cost + buy_qty * buy_price) / (old_qty + buy_qty)`. If no position row exists yet, one is created with `avg_cost = buy_price`.
+- **Sells**: `avg_cost` is unchanged; only `quantity` decreases. Realized P&L for the sale is `(sell_price - avg_cost) * sell_qty` — this is not stored as a column, but is derivable on demand from the `trades` log plus the position's `avg_cost` at time of sale.
+- **Closing a position**: when a sell brings `quantity` to (approximately) zero, delete the `positions` row rather than leaving a zero-quantity row behind.
+- **Float precision**: use an epsilon comparison (e.g. `abs(quantity) < 1e-9`) rather than exact equality when checking for a fully-closed position, to avoid floating-point residue blocking a "sell all" from actually closing it.
+- **Validation**: a sell is rejected if `sell_qty > quantity` (no short selling); a buy is rejected if `buy_qty * price > cash_balance`.
 
 ---
 
@@ -327,6 +343,31 @@ Trades specified by the LLM execute automatically — no confirmation dialog. Th
 
 If a trade fails validation (e.g., insufficient cash), the error is included in the chat response so the LLM can inform the user.
 
+### API Response Schema
+
+`POST /api/chat` returns a schema distinct from the LLM's requested-action schema above — it reports what was actually *executed*, not just what was requested, so the frontend can render accurate inline confirmations:
+
+```json
+{
+  "message": "Bought 10 shares of AAPL for you.",
+  "actions_executed": {
+    "trades": [
+      {"ticker": "AAPL", "side": "buy", "quantity": 10, "price": 190.50, "status": "executed"}
+    ],
+    "watchlist_changes": [
+      {"ticker": "PYPL", "action": "add", "status": "executed"}
+    ]
+  },
+  "errors": [
+    {"type": "trade", "ticker": "TSLA", "reason": "Insufficient cash"}
+  ]
+}
+```
+
+- `message` (required): conversational text shown to the user
+- `actions_executed` (required, may have empty arrays): trades and watchlist changes that were actually applied, each with a `status` field
+- `errors` (required, may be empty): requested actions that failed validation, with enough detail for the frontend to show why
+
 ### System Prompt Guidance
 
 The LLM should be prompted as "FinAlly, an AI trading assistant" with instructions to:
@@ -352,7 +393,7 @@ When `LLM_MOCK=true`, the backend returns deterministic mock responses instead o
 
 The frontend is a single-page application with a dense, terminal-inspired layout. The specific component architecture and layout system is up to the Frontend Engineer, but the UI should include these elements:
 
-- **Watchlist panel** — grid/table of watched tickers with: ticker symbol, current price (flashing green/red on change), daily change %, and a sparkline mini-chart (accumulated from SSE since page load)
+- **Watchlist panel** — grid/table of watched tickers with: ticker symbol, current price (flashing green/red on change), change % since the previous tick (`PriceUpdate.change_percent` from the SSE stream — tick-to-tick, not a true session-open/daily change, since no day-open baseline is tracked), and a sparkline mini-chart (accumulated from SSE since page load)
 - **Main chart area** — larger chart for the currently selected ticker, with at minimum price over time. Clicking a ticker in the watchlist selects it here.
 - **Portfolio heatmap** — treemap visualization where each rectangle is a position, sized by portfolio weight, colored by P&L (green = profit, red = loss)
 - **P&L chart** — line chart showing total portfolio value over time, using data from `portfolio_snapshots`
@@ -469,3 +510,20 @@ A doc review of this file cross-checked it against the completed market-data imp
 | 4 | Section 3 Architecture diagram | ASCII box misaligned — 3 interior lines one character wider than the border | Re-padded the offending rows |
 
 Everything else checked (SSE endpoint shape, GBM shock probability/magnitude, seed tickers/prices, update interval, `MASSIVE_API_KEY` factory selection logic) matched the implementation and required no changes.
+
+## 14. Doc Review Log — 2026-07-03
+
+A follow-up doc review (`planning/REVIEWX.md`) found 8 further issues. Fixes applied:
+
+| # | Location | Issue | Fix applied |
+|---|----------|-------|--------------|
+| 1 | Section 4 Directory Structure | Tree read as current-state but only `backend/` and `planning/` exist; `frontend/`, `scripts/`, `test/`, top-level `db/`, `Dockerfile`, `docker-compose.yml` are missing | Added a note marking the tree as target end-state, listing what's actually implemented today |
+| 2 | Section 5 / Section 2 | Required `OPENROUTER_API_KEY` conflicted with the "one command, immediately usable" first-launch story | Documented graceful degradation: everything but AI chat works without the key; `/api/chat` returns a clear unavailable message instead of failing |
+| 3 | Section 6 SSE Streaming | Described one SSE event per ticker; the implementation (`backend/app/market/stream.py`) batches all tickers into one `data:` payload keyed by ticker | Replaced the description with the actual batched JSON shape |
+| 4 | Section 10 Frontend Design | Asked for "daily change %", but `PriceUpdate.change_percent` (`backend/app/market/models.py`) is tick-to-tick with no day-open baseline | Reworded to "change % since the previous tick" and cross-referenced Section 6 |
+| 5 | Section 7 Database Schema | Said all tables include `user_id`, but `users_profile` uses `id` as its identifier with no `user_id` column | Reworded to "all tables except `users_profile`" |
+| 6 | Section 9 LLM Integration | No documented response shape for which trades/watchlist changes actually executed vs. failed | Added an "API Response Schema" subsection (`message`, `actions_executed`, `errors`) distinct from the LLM's requested-action schema |
+| 7 | Section 7 Database | No documented rule for `avg_cost` on partial sells, zero-quantity row cleanup, or float-residue handling | Added a "Cost-Basis & Trade Accounting Rules" subsection |
+| 8 | Section 5 Environment Variables | Ambiguous whether `.env` auto-loads outside Docker | Clarified that only the Docker path auto-loads `.env` via `--env-file`; local `uv run` dev needs manual export or a dotenv loader |
+
+Additionally created `.env.example` at the project root (previously missing) and updated Section 4's directory listing to reflect it.
